@@ -9,14 +9,14 @@ export interface LogEntry {
 const MAX: number = 400
 const entries: LogEntry[] = []
 const listeners: Set<(e: LogEntry) => void> = new Set()
-let enabled: boolean = true
+/** 是否同时写进 Scripting 控制台（配置 debugLog，默认关）；App 内调试页和小组件运行记录始终能看到 */
+let toConsole: boolean = false
 
 export function setLogEnabled(v: boolean): void {
-  enabled = v
+  toConsole = v
 }
 
 function push(level: LogEntry["level"], msg: string): void {
-  if (!enabled && (level === "tx" || level === "rx" || level === "info")) return
   const e: LogEntry = { t: Date.now(), level, msg }
   entries.push(e)
   if (entries.length > MAX) entries.splice(0, entries.length - MAX)
@@ -27,7 +27,7 @@ function push(level: LogEntry["level"], msg: string): void {
       // 忽略监听器异常
     }
   }
-  // 全部级别都写进 Scripting 控制台（开发服务器也会转发）
+  if (!toConsole) return
   const line: string = `[${level}] ${msg}`
   if (level === "error") console.error(line)
   else if (level === "warn") console.warn(line)

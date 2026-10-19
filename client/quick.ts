@@ -3,7 +3,7 @@
 // 前后备箱的 MOVE 是开 / 关切换，按指令前读到的状态决定发不发（core/widget_cmds 的 closureRequest）
 // 小组件进程加载不了 npm 包（protobufjs、@noble/curves），这里只能用轻量模块：
 // 编解码用 core/pb_lite，会话密钥 K 读主界面缓存在钥匙串里的那份（core/keys_lite 的 cachedSessionKeys），不做 P-256 运算
-import { sleep, unhex } from "../core/bytes"
+import { unhex } from "../core/bytes"
 import { TeslaError } from "../core/errors"
 import { cachedSessionKey, cachedSessionKeys, loadConfig, loadSessions, noCachedKey, saveConfig, SessionCacheData, VehicleConfig } from "../core/keys_lite"
 import { log } from "../core/log"
@@ -12,12 +12,10 @@ import { SessionKeys } from "../core/session"
 import { BleTransport } from "../core/transport_ble"
 import { Dispatcher } from "./dispatcher"
 import { VcsecClient, VehicleStatus } from "./vcsec"
-import { closureRequest, COMMAND_ZH, isDoorCommand, SETTLE_INTERVAL_MS, SETTLE_TIMEOUT_MS, targetReached, WidgetCommand } from "../core/widget_cmds"
+import { closureRequest, COMMAND_ZH, isLockedState, loadSnapshot, nextSelective, saveSnapshot, waitForTarget, WidgetCommand } from "../core/widget_cmds"
 
 export type QuickCommand = WidgetCommand
 
-/** 与 ui/store.ts 的 ST_SNAPSHOT 相同；这里不导入 store，避免把界面代码加载进小组件 */
-const ST_SNAPSHOT: string = "tesla_key.snapshot.v1"
 
 /** onStep：每走一步报告一次，调用方记下来，用来判断被系统中止时停在哪里；transport 供测试注入假车辆 */
 export async function quickCommand(cmd: QuickCommand, onStep?: (s: string) => void, transport?: BleTransport): Promise<void> {
@@ -62,27 +60,13 @@ export async function quickCommand(cmd: QuickCommand, onStep?: (s: string) => vo
       if (req) await v.closure(req)
       else log.info(`${COMMAND_ZH[cmd]}：已经是目标状态，不发送`)
     }
-    // 读车身状态（不需要认证、不唤醒车机）存成快照，小组件显示用；读不到不影响指令结果。
-    // 指令回复时门 / 尾门往往还没动完（尾门开合要好几秒，2026-10-18 实测只读一次会存下旧状态），
-    // 所以每 1.5 秒读一次，直到到达目标状态或超时，存最后一次读到的
+    // 等车辆动完再存快照（读车身状态不需要认证、不唤醒车机）；读不到不影响指令结果
     onStep?.("等待车辆到位")
-    try {
-      const t0: number = Date.now()
-      let status: VehicleStatus = await v.status()
-      while (!targetReached(cmd, status as any) && Date.now() - t0 < SETTLE_TIMEOUT_MS) {
-        await sleep(SETTLE_INTERVAL_MS)
-        status = await v.status()
-      }
-      log.info(`${COMMAND_ZH[cmd]}：${targetReached(cmd, status as any) ? "已到位" : "超时未到位"}，用时 ${Date.now() - t0} ms`)
-      const prev = Storage.get<{ selective?: boolean }>(ST_SNAPSHOT)
-      // 与 ui/store 一致：整车上锁时弹开单门，车辆报 UNLOCKED 但其余门仍锁着；解锁 / 上锁、车辆重新报上锁时清掉
-      const locked: boolean = (status.vehicleLockState ?? 0) === 1
-      const selective: boolean = cmd === "unlock" || cmd === "lock" || locked ? false
-        : isDoorCommand(cmd) && (pre?.vehicleLockState ?? 0) === 1 ? true
-        : prev?.selective === true
-      Storage.set(ST_SNAPSHOT, { status, at: Date.now(), selective })
-    } catch (e: any) {
-      log.warn("指令后读取状态失败: " + String(e?.message ?? e))
+    const w = await waitForTarget(cmd, () => v.status())
+    log.info(`${COMMAND_ZH[cmd]}：${w.reached ? "已到位" : "未确认到位"}，用时 ${w.ms} ms`)
+    if (w.status) {
+      const prev: boolean = loadSnapshot()?.selective === true
+      saveSnapshot({ status: w.status, at: Date.now(), selective: nextSelective(prev, cmd, isLockedState(pre?.vehicleLockState), w.status.vehicleLockState) })
     }
   } finally {
     onStep?.("断开")

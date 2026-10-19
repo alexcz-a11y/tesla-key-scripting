@@ -8,8 +8,7 @@ import { describeKey, describeStatus, DOORS, DoorKey } from "../client/vehicle"
 import { client, getState, onPush, reloadKeyInfo, subscribe } from "./store"
 import { pairKey } from "../client/pairing"
 import { runM1 } from "../tests/m1"
-import { runScanProbe } from "../tests/scan_probe"
-import { bgCapabilities, bgRegister, bgStatus, bgUnregister } from "./bg_probe"
+import { runWidgetCmds } from "../tests/widget_cmds"
 import { clearRuns, formatRuns, loadRuns } from "../core/widget_runs"
 
 const MAX_LINES: number = 400
@@ -86,9 +85,7 @@ export function DebugPage(): VirtualNode {
   }
 
   const testM1 = () => run("M1 协议测试", async () => append(await runM1()))
-  const scan = () => run("扫描 20s", async () => {
-    await runScanProbe({ localName: cfg.localName, seconds: 20, onLine: append })
-  })
+  const testWidgetCmds = () => run("小组件指令测试", async () => append(await runWidgetCmds()))
 
   const connect = () => run("连接车辆", async () => {
     await client.connect()
@@ -201,16 +198,9 @@ export function DebugPage(): VirtualNode {
         append("已清空小组件记录")
       }} />
     </Section>
-    <Section header={<Text>后台蓝牙测试（只观察，不发指令）</Text>}
-      footer={<Text>注册后后台一直连着车，占用一个连接位；改动 bluetooth.tsx 后要重新注册。用完请注销。</Text>}>
-      <Button title="查看能力与限制" systemImage="info.circle" action={() => void run("后台能力", () => bgCapabilities(append))} disabled={!idle} />
-      <Button title="注册测试任务" systemImage="antenna.radiowaves.left.and.right" action={() => void run("注册后台任务", () => bgRegister(append))} disabled={!idle} />
-      <Button title="查看任务状态与观察结果" systemImage="list.bullet.rectangle" action={() => void run("后台任务状态", () => bgStatus(append))} disabled={!idle} />
-      <Button title="注销测试任务" systemImage="xmark.circle" action={() => void run("注销后台任务", () => bgUnregister(append))} disabled={!idle} />
-    </Section>
     <Section header={<Text>M0</Text>}>
       <Button title="M1 协议测试" systemImage="checkmark.seal" action={testM1} disabled={!idle} />
-      <Button title="扫描 20s" systemImage="antenna.radiowaves.left.and.right" action={scan} disabled={!idle} />
+      <Button title="小组件指令测试" systemImage="checkmark.seal" action={testWidgetCmds} disabled={!idle} />
     </Section>
     <Section header={<Text>输出</Text>}>
       <Toggle title="显示协议日志（TX/RX）" value={showProto} onChanged={setShowProto} />

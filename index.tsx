@@ -5,7 +5,9 @@ import { ControlsPage } from "./ui/controls"
 import { KeysPage } from "./ui/keys"
 import { DebugPage } from "./ui/debug"
 import { autoConnect, disconnect, getState, handleRemote, reloadKeyInfo } from "./ui/store"
-import { ST_MAIN_SESSION } from "./app_intents"
+import { ST_MAIN_SESSION } from "./core/widget_cmds"
+import { loadConfig } from "./core/keystore"
+import { setLogEnabled } from "./core/log"
 
 type Page = "controls" | "keys" | "debug"
 
@@ -42,24 +44,32 @@ function App(): VirtualNode {
 }
 
 async function main(): Promise<void> {
-  // 按 status_bar 文档：全屏呈现，statusBarHidden 才生效。退出：轻点左上 Connected 块 →「退出」
+  // 按 status_bar 文档：全屏呈现，statusBarHidden 才生效。退出：轻点左上连接块 →「退出」
   // 主界面运行期间接收小组件的指令（ScriptSession：只能由 index 注册，主脚本关闭后失效）
-  const sessionId: string = ScriptSession.register(async (message: ScriptSession.Value) => {
-    const cmd: unknown = message && typeof message === "object" && !Array.isArray(message) ? message.command : null
-    return await handleRemote(cmd)
-  })
-  Storage.set(ST_MAIN_SESSION, sessionId)
+  // script/api 文档：务必调用 Script.exit() 释放资源，所以放在 finally 里，前面任何一步出错都会退出
+  let sessionId: string | null = null
   try {
-    console.log("[main] present")
+    setLogEnabled(loadConfig().debugLog)
+    sessionId = ScriptSession.register(async (message: ScriptSession.Value) => {
+      const cmd: unknown = message && typeof message === "object" && !Array.isArray(message) ? message.command : null
+      return await handleRemote(cmd)
+    })
+    Storage.set(ST_MAIN_SESSION, sessionId)
     await Navigation.present({ element: <App />, modalPresentationStyle: "fullScreen" })
   } catch (e: any) {
-    console.error("[main] present 出错: " + String(e?.message ?? e) + "\n" + String(e?.stack ?? ""))
+    console.error("[main] 出错: " + String(e?.message ?? e))
   } finally {
-    ScriptSession.unregister(sessionId)
-    if (Storage.get<string>(ST_MAIN_SESSION) === sessionId) Storage.remove(ST_MAIN_SESSION)
+    try {
+      if (sessionId) {
+        ScriptSession.unregister(sessionId)
+        if (Storage.get<string>(ST_MAIN_SESSION) === sessionId) Storage.remove(ST_MAIN_SESSION)
+      }
+      await disconnect()
+    } catch (_e) {
+      // 退出前的清理失败不影响退出
+    }
+    Script.exit()
   }
-  await disconnect()
-  Script.exit()
 }
 
 void main()

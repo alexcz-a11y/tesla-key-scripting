@@ -7,26 +7,16 @@
 // 对顺序敏感的修饰符（内边距 → 撑满 → 背景）用 modifiers() 链式写，顺序与 SwiftUI 一致。
 // 深浅色：根背景用 widgetBackground（「透明」「色调」外观下系统自动隐藏），文字用自定义深浅两色（次要文字比系统 secondaryLabel 深，保证 4.5:1）；
 // accented 渲染模式下内容都会被染成白色，车图改用深色版（白线）那套。
-// 车图是按每个位置的尺寸预先导出的 3x PNG（assets/widget-r2，目录名带版本号，见 ASSET_DIR；导出脚本在 reference/ai-wireframe/pipeline/widget），小组件里不做裁切和遮罩，省内存（上限约 30 MB）。
+// 车图是按每个位置的尺寸预先导出的 3x PNG（assets/widget-r2，目录名带版本号，见 ASSET_DIR；导出脚本在作者本地的素材工程里，不在本仓库），
+// 小组件里不做裁切和遮罩，省内存（上限约 30 MB）。
+// 文字只显示结果（状态、可做的操作），不显示「执行中」之类的中间状态：中间状态会让文字变长、放不下变成省略号。
 // 静态导入链里只能放轻量模块（npm 包会让小组件空白）
 import { Button, DateLabel, DynamicShapeStyle, EnvironmentValuesReader, HStack, Image, modifiers, Path, Script, Shape, Spacer, SVG, Text, VirtualNode, VStack, Widget, ZStack } from "scripting"
 import { CommandIntent } from "./app_intents"
-import { closureOpen, WidgetCommand } from "./core/widget_cmds"
-import { loadRuns, WidgetRun } from "./core/widget_runs"
+import { closureOpen, DoorCommand, loadSnapshot, Snapshot, snapshotLocked, WIDGET_DOORS, WidgetCommand } from "./core/widget_cmds"
+import { SleepStatus, UserPresence } from "./core/proto_consts"
 
-/** 与 ui/store.ts 的 ST_SNAPSHOT 相同；这里不导入 store，避免把界面代码加载进小组件 */
-const ST_SNAPSHOT: string = "tesla_key.snapshot.v1"
-
-interface Snap {
-  status: {
-    vehicleLockState?: number
-    vehicleSleepStatus?: number
-    userPresence?: number
-    closureStatuses?: Record<string, number | undefined>
-  }
-  at: number
-  selective?: boolean
-}
+type Snap = Snapshot
 
 // ---- 配色（原型 THEME） ----
 const TEXT: DynamicShapeStyle = { light: "#000000", dark: "#FFFFFF" }
@@ -35,7 +25,8 @@ const DIM: DynamicShapeStyle = { light: "rgba(60,60,67,0.76)", dark: "rgba(235,2
  * 按钮块：inverse 方案（画布原型的 tile = inverse）。线框图正后方永远是整块里最暗（浅色版最亮）的地方：
  *   平时 = 下沉的暗槽 + 很淡的点阵 + 内阴影（Scripting 没有内阴影，做成图：tile_{medium,large}_{d,l}.png）；
  *   打开 / 解锁 = 整块翻成实体（深色版白块、浅色版深块），线框图换成另一套（深色版用墨线图、浅色版用白线图），状态字用强调色。
- * 「透明」「色调」外观下内容会被染成白色、只留透明度：平时用白色 8% 的底，打开 / 解锁用白色 32% 的底，层次还在
+ * 「透明」「色调」外观下内容会被染成白色、只留透明度；Scripting 的「透明背景 / 模糊背景小组件」要求内容不画不透明底：
+ * 这两种情况都改用半透明白底（平时 8%、打开 / 解锁 32%），层次还在
  */
 const ACTIVE_BG: DynamicShapeStyle = {
   dark: { colors: ["#FFFFFF", "#E3E6EB"], startPoint: "top", endPoint: "bottom" },
@@ -63,10 +54,10 @@ type Slot = "small" | "medium" | "large"
 const NAME: Record<Part, string> = {
   lock: "车锁", door_fl: "左前门", door_fr: "右前门", door_rl: "左后门", door_rr: "右后门", frunk: "前备箱", trunk: "后备箱", charge: "充电口",
 }
-const CLOSURE: Partial<Record<Part, string>> = {
-  door_fl: "frontDriverDoor", door_fr: "frontPassengerDoor", door_rl: "rearDriverDoor", door_rr: "rearPassengerDoor",
-  frunk: "frontTrunk", trunk: "rearTrunk", charge: "chargePort",
-}
+/** 部位对应的 closureStatuses 键（车门取自 core/widget_cmds 的 WIDGET_DOORS） */
+const CLOSURE: Partial<Record<Part, string>> = { ...WIDGET_DOORS, frunk: "frontTrunk", trunk: "rearTrunk", charge: "chargePort" }
+/** 中号和大号底部那一排 */
+const ROW_PARTS: Part[] = ["lock", "frunk", "trunk", "charge"]
 const SMALL_PARTS: Part[] = ["lock", "door_fl", "door_fr", "door_rl", "door_rr", "trunk", "charge"]
 
 interface PartState {
@@ -77,19 +68,16 @@ interface PartState {
   known: boolean
   state: string
   hint: string
-  cmd: WidgetCommand
+  /** 轻点发的指令；null = 没有可做的（车门 / 前备箱已打开，只能手动关），轻点只打开 App */
+  cmd: WidgetCommand | null
   label: string
-}
-
-function isLocked(s: Snap | null): boolean {
-  // 单门弹开后车报 UNLOCKED，但其余门仍锁着（selective），当作已锁
-  return s != null && ((s.status.vehicleLockState ?? 0) === 1 || s.selective === true)
 }
 
 function partState(part: Part, s: Snap | null): PartState {
   const known: boolean = s != null
   if (part === "lock") {
-    const locked: boolean = !known || isLocked(s)
+    // 单门弹开后车报 UNLOCKED，但其余门仍锁着（selective），当作已锁
+    const locked: boolean = !known || snapshotLocked(s)
     return {
       part, open: !locked, known,
       state: !known ? "未知" : locked ? "已上锁" : "已解锁",
@@ -102,24 +90,21 @@ function partState(part: Part, s: Snap | null): PartState {
   const state: string = !known ? "未知" : open ? "已打开" : "关闭"
   if (part.startsWith("door_")) {
     const hint: string = open ? "需手动关门" : "轻点弹开"
-    return { part, open, known, state, hint, cmd: part as WidgetCommand, label: `${NAME[part]}${state}，${hint}` }
+    return { part, open, known, state, hint, cmd: open ? null : (part as DoorCommand), label: `${NAME[part]}${state}，${hint}` }
   }
   if (part === "frunk") {
     const hint: string = open ? "需手动关闭" : "轻点打开"
-    return { part, open, known, state, hint, cmd: "frunk_open", label: `前备箱${state}，${hint}` }
+    return { part, open, known, state, hint, cmd: open ? null : "frunk_open", label: `前备箱${state}，${hint}` }
   }
   const hint: string = open ? "轻点关闭" : "轻点打开"
   const cmd: WidgetCommand = part === "trunk" ? (open ? "trunk_close" : "trunk_open") : open ? "charge_close" : "charge_open"
   return { part, open, known, state, hint, cmd, label: `${NAME[part]}${state}，${hint}` }
 }
 
-/** 最近一次点按还在执行 / 刚失败时，替换提示文字 */
-function runHint(run: WidgetRun | undefined, cmds: WidgetCommand[]): string | null {
-  if (!run || !cmds.includes(run.cmd as WidgetCommand)) return null
-  const now: number = Date.now()
-  if (!run.result) return now - run.start < 60000 ? "执行中…" : null
-  if (!run.result.ok && now - run.result.at < 10 * 60000) return "失败，轻点重试"
-  return null
+/** 有指令时整块是按钮；没有可做的指令时只是普通视图（轻点打开 App），避免重复发已经到位的指令 */
+function Tap({ p, children }: { p: PartState; children: VirtualNode }): VirtualNode {
+  if (!p.cmd) return <VStack accessibilityLabel={p.label}>{children}</VStack>
+  return <Button intent={CommandIntent({ cmd: p.cmd })} buttonStyle="plain" accessibilityLabel={p.label}>{children}</Button>
 }
 
 // ---- 图 ----
@@ -128,6 +113,8 @@ function runHint(run: WidgetRun | undefined, cmds: WidgetCommand[]): string | nu
  * 所以图片有改动就整体导出到新目录、改这里的版本号（导出脚本：reference/ai-wireframe/pipeline/widget/parts.py）
  */
 const ASSET_DIR: string = "widget-r2"
+/** 渲染必需的几张图（检查图片有没有同步到手机时用） */
+const REQUIRED_ASSETS: string[] = ["tile_medium_d.png", "tile_large_d.png", "large_car_d.png", "small_lock_0_d.png", "medium_lock_0_d.png"]
 
 function asset(name: string): string {
   return Path.join(Script.directory, "assets", ASSET_DIR, name)
@@ -156,32 +143,31 @@ function partImage(slot: Slot, part: Part, open: boolean, mode: ImageMode): Virt
 }
 
 // ---- 小号 ----
-// 四周 16pt；部位名 13pt / 图 / 状态 20pt + 提示 13pt，行距 6pt；整个小组件是一个按钮
-function Small({ part, snap, run, accented }: { part: Part; snap: Snap | null; run: WidgetRun | undefined; accented: boolean }): VirtualNode {
+// 四周 16pt；部位名 13pt / 图 / 状态 20pt + 提示 13pt，行距 6pt；整个小组件是一个按钮（没有可做的指令时不是）
+function Small({ part, snap, accented }: { part: Part; snap: Snap | null; accented: boolean }): VirtualNode {
   const p: PartState = partState(part, snap)
-  const hint: string = runHint(run, [p.cmd]) ?? p.hint
-  return <Button intent={CommandIntent({ cmd: p.cmd })} buttonStyle="plain" accessibilityLabel={p.label}>
+  return <Tap p={p}>
     <VStack alignment="leading" spacing={6} modifiers={modifiers().padding(16).frame({ maxWidth: "infinity", maxHeight: "infinity", alignment: "topLeading" })}>
       <Text font="footnote" fontWeight="semibold" foregroundStyle={DIM} lineLimit={1} minScaleFactor={FOOTNOTE_MIN}>{NAME[part]}</Text>
       {partImage("small", part, p.open, accented ? "accented" : "normal")}
       <HStack alignment="firstTextBaseline" spacing={4}>
         <Text font="title3" fontWeight="semibold" foregroundStyle={TEXT} lineLimit={1} minScaleFactor={0.7}>{p.state}</Text>
         <Spacer minLength={0} />
-        <Text font="footnote" foregroundStyle={DIM} lineLimit={1} minScaleFactor={FOOTNOTE_MIN}>{hint}</Text>
+        <Text font="footnote" foregroundStyle={DIM} lineLimit={1} minScaleFactor={FOOTNOTE_MIN}>{p.hint}</Text>
       </HStack>
     </VStack>
-  </Button>
+  </Tap>
 }
 
 // ---- 按钮块（中号 / 大号底部） ----
 // 中号：内边距上 10 / 左右 4 / 下 12，图 + 部位名 13pt + 状态 12pt；大号：上 7 / 下 6，图 + 部位名
-function TileBackground({ slot, active, accented }: { slot: "medium" | "large"; active: boolean; accented: boolean }): VirtualNode {
+function TileBackground({ slot, active, plain }: { slot: "medium" | "large"; active: boolean; plain: boolean }): VirtualNode {
   const fill = modifiers().frame({ maxWidth: "infinity", maxHeight: "infinity" })
-  if (accented) {
+  if (plain) {
     return <VStack modifiers={fill.background({ style: active ? "rgba(255,255,255,0.32)" : "rgba(255,255,255,0.08)", shape: TILE_SHAPE })}>{[]}</VStack>
   }
   if (active) {
-    return <VStack modifiers={fill.background({ style: ACTIVE_BG, shape: TILE_SHAPE }).shadow({ color: "rgba(0,0,0,0.35)", radius: 10, x: 0, y: 6 })}>{[]}</VStack>
+    return <VStack modifiers={fill.background({ style: ACTIVE_BG, shape: TILE_SHAPE })}>{[]}</VStack>
   }
   // 平时：暗槽底图按按钮大小拉伸（尺寸按 430pt 机型做的，其他机型只差几个点），再按小组件圆角裁切
   return <Image
@@ -191,45 +177,48 @@ function TileBackground({ slot, active, accented }: { slot: "medium" | "large"; 
   />
 }
 
-function Tile({ p, slot, accented, run, showState }: { p: PartState; slot: "medium" | "large"; accented: boolean; run: WidgetRun | undefined; showState: boolean }): VirtualNode {
-  const busy: string | null = runHint(run, [p.cmd])
+/** 外观：accented =「透明」「色调」外观（内容被染白）；plainBg = 不能画不透明底（accented，或 Scripting 的透明背景 / 模糊背景小组件） */
+interface Look {
+  accented: boolean
+  plainBg: boolean
+}
+
+function Tile({ p, slot, look, showState }: { p: PartState; slot: "medium" | "large"; look: Look; showState: boolean }): VirtualNode {
   const pad = slot === "medium" ? { top: 10, leading: 4, trailing: 4, bottom: 12 } : { top: 7, leading: 4, trailing: 4, bottom: 6 }
   const active: boolean = p.open
-  const flip: boolean = active && !accented
-  return <Button intent={CommandIntent({ cmd: p.cmd })} buttonStyle="plain" accessibilityLabel={p.label}>
+  const flip: boolean = active && !look.plainBg
+  return <Tap p={p}>
     <ZStack modifiers={modifiers().frame({ maxWidth: "infinity", maxHeight: "infinity" })}>
-      <TileBackground slot={slot} active={active} accented={accented} />
+      <TileBackground slot={slot} active={active} plain={look.plainBg} />
       <VStack spacing={slot === "medium" ? 6 : 4} modifiers={modifiers().padding(pad).frame({ maxWidth: "infinity", maxHeight: "infinity" })}>
-        {partImage(slot, p.part, p.open, accented ? "accented" : flip ? "swap" : "normal")}
+        {partImage(slot, p.part, p.open, look.accented ? "accented" : flip ? "swap" : "normal")}
         <VStack spacing={1}>
           <Text font="footnote" fontWeight="semibold" foregroundStyle={flip ? ACTIVE_TEXT : TEXT} lineLimit={1} minScaleFactor={FOOTNOTE_MIN}>{NAME[p.part]}</Text>
           {showState
-            ? <Text font="caption" foregroundStyle={flip ? ACTIVE_STATUS : busy || active ? TEXT : DIM} lineLimit={1} minScaleFactor={CAPTION_MIN}>{busy ?? p.state}</Text>
+            ? <Text font="caption" foregroundStyle={flip ? ACTIVE_STATUS : active ? TEXT : DIM} lineLimit={1} minScaleFactor={CAPTION_MIN}>{p.state}</Text>
             : null}
         </VStack>
       </VStack>
     </ZStack>
-  </Button>
+  </Tap>
 }
 
 // 按钮组：离边 11pt、间距 8pt（HIG 给按钮 / 背景形状分组用的紧凑边距）
-function Medium({ snap, run, accented }: { snap: Snap | null; run: WidgetRun | undefined; accented: boolean }): VirtualNode {
-  const parts: Part[] = ["lock", "frunk", "trunk", "charge"]
+function Medium({ snap, look }: { snap: Snap | null; look: Look }): VirtualNode {
   return <HStack spacing={8} modifiers={modifiers().padding(11).frame({ maxWidth: "infinity", maxHeight: "infinity" })}>
-    {parts.map((part: Part) => <Tile p={partState(part, snap)} slot="medium" accented={accented} run={run} showState />)}
+    {ROW_PARTS.map((part: Part) => <Tile p={partState(part, snap)} slot="medium" look={look} showState />)}
   </HStack>
 }
 
 // ---- 大号 ----
-const DOORS: { part: "door_fl" | "door_fr" | "door_rl" | "door_rr"; name: string }[] = [
-  { part: "door_fl", name: "左前门" }, { part: "door_rl", name: "左后门" }, { part: "door_fr", name: "右前门" }, { part: "door_rr", name: "右后门" },
-]
+/** 状态摘要里车门的列举顺序 */
+const DOOR_ORDER: DoorCommand[] = ["door_fl", "door_rl", "door_fr", "door_rr"]
 
 /** 原型 renderVals 的第一行：开得多时合并，宽度始终放得下 */
 function summary(snap: Snap | null): string {
   if (!snap) return "还没有车辆状态，打开 App 连接一次"
   const cs: Record<string, number | undefined> = snap.status.closureStatuses ?? {}
-  const opened: string[] = DOORS.filter((d) => closureOpen(cs[CLOSURE[d.part] as string])).map((d) => d.name)
+  const opened: string[] = DOOR_ORDER.filter((d: DoorCommand) => closureOpen(cs[WIDGET_DOORS[d]])).map((d: DoorCommand) => NAME[d])
   const frunk: boolean = closureOpen(cs.frontTrunk), trunk: boolean = closureOpen(cs.rearTrunk), charge: boolean = closureOpen(cs.chargePort)
   const items: string[] = []
   if (opened.length >= 3) items.push(`${opened.length} 扇车门`)
@@ -239,13 +228,13 @@ function summary(snap: Snap | null): string {
   else if (trunk) items.push("后备箱")
   if (charge) items.push("充电口")
   if (items.length) return items.join("、") + "已开"
-  const presence: number = snap.status.userPresence ?? 0
-  const sleep: number = snap.status.vehicleSleepStatus ?? 0
+  const presence: number | undefined = snap.status.userPresence
+  const sleep: number | undefined = snap.status.vehicleSleepStatus
   const rest: string[] = ["车门全关"]
-  if (presence === 1) rest.push("车内无人")
-  else if (presence === 2) rest.push("车内有人")
-  if (sleep === 2) rest.push("车机休眠")
-  else if (sleep === 1) rest.push("车机唤醒")
+  if (presence === UserPresence.NOT_PRESENT) rest.push("车内无人")
+  else if (presence === UserPresence.PRESENT) rest.push("车内有人")
+  if (sleep === SleepStatus.ASLEEP) rest.push("车机休眠")
+  else if (sleep === SleepStatus.AWAKE) rest.push("车机唤醒")
   return rest.join(" · ")
 }
 
@@ -274,11 +263,11 @@ function topCarSvg(cs: Record<string, number | undefined>, light: boolean): stri
     + `<g fill="none" stroke="${M.door}" stroke-linecap="round">${doors}</g></svg>`
 }
 
-function DoorHit({ part, snap, w }: { part: "door_fl" | "door_fr" | "door_rl" | "door_rr"; snap: Snap | null; w: number }): VirtualNode {
-  const p: PartState = partState(part, snap)
-  return <Button intent={CommandIntent({ cmd: p.cmd })} buttonStyle="plain" accessibilityLabel={p.open ? `${NAME[part]}已打开` : `弹开${NAME[part]}`}>
+function DoorHit({ part, snap, w }: { part: DoorCommand; snap: Snap | null; w: number }): VirtualNode {
+  // 门已打开时没有可做的指令（只能手动关），这块区域轻点只打开 App
+  return <Tap p={partState(part, snap)}>
     <Text frame={{ width: w, height: 44 }} contentShape="rect"> </Text>
-  </Button>
+  </Tap>
 }
 
 /**
@@ -290,20 +279,19 @@ function carSize(size: { width: number; height: number }): { w: number; h: numbe
   return { w: h * 1440 / 660, h }
 }
 
-function Large({ snap, run, accented, size }: { snap: Snap | null; run: WidgetRun | undefined; accented: boolean; size: { width: number; height: number } }): VirtualNode {
-  const locked: boolean = snap == null || isLocked(snap)
+function Large({ snap, look, size }: { snap: Snap | null; look: Look; size: { width: number; height: number } }): VirtualNode {
+  const locked: boolean = snap == null || snapshotLocked(snap)
   const car = carSize(size)
   // 整车图是加宽版（1852 × 866：车头前方左边 412、上 112、下 94 是雾天车灯的光柱和雾）。
   // 车身按原来的框（car.w × car.h）摆，加宽出来的部分超出框画出去，越过小组件边缘时被小组件裁掉
   const k: number = car.w / 1440
   const cs: Record<string, number | undefined> = snap?.status.closureStatuses ?? {}
-  const busy: string | null = runHint(run, ["unlock", "lock", "door_fl", "door_fr", "door_rl", "door_rr", "frunk_open", "trunk_open", "trunk_close", "charge_open", "charge_close"])
   return <VStack spacing={0} frame={{ maxWidth: "infinity", maxHeight: "infinity", alignment: "top" }}>
     {/* 标题区离左、上 16pt；俯视图点击区离右 11pt、离上 14pt（原型：点击区 (238,14) 115×88，俯视图 130×76 在 (233,20)） */}
     <HStack alignment="top" spacing={12} modifiers={modifiers().padding({ top: 14, leading: 16, trailing: 11 })}>
       <VStack alignment="leading" spacing={2} modifiers={modifiers().padding({ top: 2 }).frame({ maxWidth: "infinity", alignment: "leading" })}>
         <Text font="title" fontWeight="semibold" foregroundStyle={TEXT} lineLimit={1} minScaleFactor={0.7}>{snap == null ? "未知" : locked ? "已上锁" : "已解锁"}</Text>
-        <Text font="footnote" foregroundStyle={DIM} lineLimit={1} minScaleFactor={FOOTNOTE_MIN}>{busy ?? summary(snap)}</Text>
+        <Text font="footnote" foregroundStyle={DIM} lineLimit={1} minScaleFactor={FOOTNOTE_MIN}>{summary(snap)}</Text>
         {snap
           ? <HStack spacing={0}>
             <Text font="footnote" foregroundStyle={DIM} lineLimit={1}>Model Y · </Text>
@@ -314,7 +302,7 @@ function Large({ snap, run, accented, size }: { snap: Snap | null; run: WidgetRu
       </VStack>
       <ZStack frame={{ width: 115, height: 88 }}>
         <SVG
-          code={accented ? topCarSvg(cs, false) : { light: topCarSvg(cs, true), dark: topCarSvg(cs, false) }}
+          code={look.accented ? topCarSvg(cs, false) : { light: topCarSvg(cs, true), dark: topCarSvg(cs, false) }}
           resizable
           modifiers={modifiers().scaleToFit().frame({ width: 130, height: 76 }).offset({ x: 2.5, y: 0 })}
         />
@@ -336,7 +324,7 @@ function Large({ snap, run, accented, size }: { snap: Snap | null; run: WidgetRu
         深色版开着灯；浅色版和「透明」「色调」外观用不开灯的浅色版（同样加宽，位置完全一样） */}
     <ZStack frame={{ width: car.w, height: car.h }}>
       <Image
-        filePath={accented ? asset("large_car_l.png") : { light: asset("large_car_l.png"), dark: asset("large_car_d.png") }}
+        filePath={look.accented ? asset("large_car_l.png") : { light: asset("large_car_l.png"), dark: asset("large_car_d.png") }}
         resizable
         modifiers={modifiers().frame({ width: 1852 * k, height: 866 * k }).offset({ x: (926 - 1132) * k, y: (433 - 442) * k })}
       />
@@ -344,19 +332,12 @@ function Large({ snap, run, accented, size }: { snap: Snap | null; run: WidgetRu
     <Spacer minLength={8} />
     {/* 底部按钮组：高 81pt，离左右下 11pt，间距 8pt */}
     <HStack spacing={8} modifiers={modifiers().frame({ height: 81 }).padding({ leading: 11, trailing: 11, bottom: 11 })}>
-      {(["lock", "frunk", "trunk", "charge"] as Part[]).map((part: Part) => <Tile p={partState(part, snap)} slot="large" accented={accented} run={run} showState={false} />)}
+      {ROW_PARTS.map((part: Part) => <Tile p={partState(part, snap)} slot="large" look={look} showState={false} />)}
     </HStack>
   </VStack>
 }
 
 // ---- 入口 ----
-function loadSnap(): Snap | null {
-  try {
-    return Storage.get<Snap>(ST_SNAPSHOT)
-  } catch (_e) {
-    return null
-  }
-}
 
 function smallPart(): Part {
   const raw: string = String(Widget.parameter ?? "").trim().toLowerCase()
@@ -364,25 +345,28 @@ function smallPart(): Part {
 }
 
 function View({ missing }: { missing: string | null }): VirtualNode {
-  const snap: Snap | null = loadSnap()
-  const runs: WidgetRun[] = loadRuns()
-  const run: WidgetRun | undefined = runs[runs.length - 1]
+  const snap: Snap | null = loadSnapshot()
   const family = Widget.family
   const size = Widget.displaySize
+  // 锁屏尺寸（先只做主屏幕）：只显示一行锁状态，不放按钮和图
+  if (family === "accessoryCircular" || family === "accessoryRectangular" || family === "accessoryInline") {
+    return <Text font="headline" lineLimit={1} minScaleFactor={0.7}>{snap == null ? "Tesla" : snapshotLocked(snap) ? "已上锁" : "已解锁"}</Text>
+  }
   return <EnvironmentValuesReader keys={["widgetRenderingMode"]}>
     {(env) => {
       const accented: boolean = env.widgetRenderingMode === "accented"
+      const look: Look = { accented, plainBg: accented || Widget.isTransparentMode || Widget.isBlurMode }
       let body: VirtualNode
       if (family === "systemLarge" || family === "systemExtraLarge" || family === "systemExtraLargePortrait") {
-        body = <Large snap={snap} run={run} accented={accented} size={size} />
+        body = <Large snap={snap} look={look} size={size} />
       } else if (family === "systemMedium") {
-        body = <Medium snap={snap} run={run} accented={accented} />
+        body = <Medium snap={snap} look={look} />
       } else {
-        body = <Small part={smallPart()} snap={snap} run={run} accented={accented} />
+        body = <Small part={smallPart()} snap={snap} accented={accented} />
       }
       return <ZStack frame={{ maxWidth: "infinity", maxHeight: "infinity" }} widgetBackground={BG}>
         {body}
-        {missing ? <Text font="caption2" foregroundStyle="red" lineLimit={6} minScaleFactor={0.5} frame={{ maxWidth: "infinity", maxHeight: "infinity", alignment: "bottom" }}>{missing}</Text> : null}
+        {missing ? <Text font="caption" foregroundStyle="red" lineLimit={1} minScaleFactor={0.8} frame={{ maxWidth: "infinity", maxHeight: "infinity", alignment: "bottom" }}>{missing}</Text> : null}
       </ZStack>
     }}
   </EnvironmentValuesReader>
@@ -392,19 +376,12 @@ function View({ missing }: { missing: string | null }): VirtualNode {
  * 图片在 Scripting 的 iCloud Drive 容器里（2026-10-18 实测：开发服务器只同步代码、不同步图片，图片是在 Mac 上直接复制进
  * ~/Library/Mobile Documents/iCloud~com~thomfang~Scripting/Documents/scripts/Tesla Key/assets/ 再由 iCloud 同步到手机的）。
  * 手机上的 iCloud 文件可能只有占位、没有下载，小组件进程不会自己去下：每次渲染前把还没下载的图片下载下来（已下载的直接跳过）。
- * 还是读不到时，把 assets 目录里实际有什么、iCloud 状态写在小组件底部（正常时不显示）
+ * 必需的图还是读不到时，在小组件底部用一行红字提示（正常时不显示）
  */
 async function ensureAssets(): Promise<string | null> {
-  const dir: string = Path.join(Script.directory, "assets")
-  const r2: string = Path.join(dir, ASSET_DIR)
-  const probe: string = asset("tile_medium_d.png")
-  const notes: string[] = []
+  const r2: string = Path.join(Script.directory, "assets", ASSET_DIR)
   try {
-    try {
-      if (!FileManager.existsSync(r2)) await FileManager.downloadFileFromiCloud(r2)
-    } catch (e: any) {
-      notes.push("下载目录失败 " + String(e?.message ?? e))
-    }
+    if (!FileManager.existsSync(r2)) await FileManager.downloadFileFromiCloud(r2).catch(() => false)
     if (FileManager.existsSync(r2)) {
       // 没下载的文件在目录里显示为「.名字.icloud」占位
       const names: string[] = FileManager.readDirectorySync(r2).map((n: string) => n.replace(/^\.(.+)\.icloud$/, "$1")).filter((n: string) => n.endsWith(".png"))
@@ -415,27 +392,12 @@ async function ensureAssets(): Promise<string | null> {
           return true
         }
       })
-      if (todo.length) {
-        const ok: boolean[] = await Promise.all(todo.map((f: string) => FileManager.downloadFileFromiCloud(f).catch(() => false)))
-        notes.push(`下载 ${ok.filter(Boolean).length}/${todo.length}`)
-      }
+      if (todo.length) await Promise.all(todo.map((f: string) => FileManager.downloadFileFromiCloud(f).catch(() => false)))
     }
-    if (FileManager.existsSync(probe)) return null
-    let list: string
-    try {
-      list = FileManager.readDirectorySync(dir).join(" ")
-    } catch (e: any) {
-      list = "读目录失败 " + String(e?.message ?? e)
-    }
-    let r2info: string
-    try {
-      r2info = FileManager.existsSync(r2) ? `${ASSET_DIR} 有 ${FileManager.readDirectorySync(r2).length} 个` : `${ASSET_DIR} 不存在`
-    } catch (e: any) {
-      r2info = "读目录失败 " + String(e?.message ?? e)
-    }
-    return `缺图片：assets = [${list}]；${r2info}；${notes.join("；")}`
-  } catch (e: any) {
-    return "检查图片失败 " + String(e?.message ?? e)
+    const missing: number = REQUIRED_ASSETS.filter((n: string) => !FileManager.existsSync(asset(n))).length
+    return missing ? `图片未同步（缺 ${missing} 张），请检查 iCloud` : null
+  } catch (_e) {
+    return "图片读取失败，请检查 iCloud"
   }
 }
 

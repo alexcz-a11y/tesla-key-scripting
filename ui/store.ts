@@ -1,7 +1,6 @@
 // 界面状态：单例车辆客户端 + 连接 / 状态推送 / RSSI / 进行中的指令，各页面通过 useApp() 订阅
-import { useEffect, useState } from "scripting"
+import { useEffect, useState, Widget } from "scripting"
 import { describeError, TeslaError } from "../core/errors"
-import { sleep } from "../core/bytes"
 import { getPublicKeyId, hasPrivateKey, loadConfig, saveConfig, VehicleConfig } from "../core/keystore"
 import { log } from "../core/log"
 import { ClosureState, LockState, SleepStatus } from "../core/proto"
@@ -10,9 +9,8 @@ import { DoorKey, VehicleClient } from "../client/vehicle"
 import { VehicleStatus } from "../client/vcsec"
 import { Act, CATEGORIES, Category, HeaterLevel, isValidPin, Seat } from "../client/infotainment"
 import { Msg } from "../client/dispatcher"
-import { closureRequest, COMMAND_ZH, isDoorCommand, isWidgetCommand, SETTLE_INTERVAL_MS, SETTLE_TIMEOUT_MS, targetReached, WIDGET_DOORS, WidgetCommand } from "../core/widget_cmds"
+import { closureOpen, closureRequest, COMMAND_ZH, isDoorCommand, isLockedState, isWidgetCommand, loadSnapshot as loadBodySnapshot, nextSelective, saveSnapshot, waitForTarget, WIDGET_DOORS, WidgetCommand } from "../core/widget_cmds"
 
-const ST_SNAPSHOT: string = "tesla_key.snapshot.v1"
 const ST_CAR: string = "tesla_key.car.v1"
 const RSSI_INTERVAL_MS: number = 3000
 /** 单条指令（含连接、唤醒车机）的总时限 */
@@ -51,11 +49,7 @@ export interface AppState {
 export type CarData = Partial<Record<Category, Msg>>
 
 function loadSnapshot(): { status: VehicleStatus; at: number; selective?: boolean } | null {
-  try {
-    return Storage.get<{ status: VehicleStatus; at: number; selective?: boolean }>(ST_SNAPSHOT)
-  } catch (_e) {
-    return null
-  }
+  return loadBodySnapshot<VehicleStatus>()
 }
 
 function loadCarSnapshot(): { car: CarData; at: number } | null {
@@ -126,18 +120,11 @@ export function useApp(): AppState {
 
 function applyStatus(st: VehicleStatus): void {
   const at: number = Date.now()
-  const locked: boolean = (st.vehicleLockState ?? 0) === LockState.LOCKED
-  // 单门弹开后车辆报 UNLOCKED，但实测其余门和前后备箱仍然拉不开。
-  // 只在车辆重新报上锁、或用本 App 解锁 / 上锁时结束这个标记；
-  // 不能按「有没有门开着」判断：指令回复后马上读到的状态里，门还没真正弹开（2026-10-17 实测因此被提前清掉）
-  const selective: boolean = state.selective && !locked
+  // 单门弹开后车辆报 UNLOCKED，但实测其余门和前后备箱仍然拉不开：这个标记的规则见 core/widget_cmds 的 nextSelective
+  const selective: boolean = nextSelective(state.selective, null, false, st.vehicleLockState)
   set({ status: st, statusAt: at, live: true, selective })
-  try {
-    // 单门弹开标记一起保存：重新打开 App 时车辆仍报 UNLOCKED，但其余门其实还锁着
-    Storage.set(ST_SNAPSHOT, { status: st, at, selective })
-  } catch (_e) {
-    // 快照只是缓存
-  }
+  // 单门弹开标记一起保存：重新打开 App 时车辆仍报 UNLOCKED，但其余门其实还锁着
+  saveSnapshot({ status: st, at, selective })
 }
 
 client.onStatusPush = (st: VehicleStatus) => {
@@ -264,37 +251,34 @@ async function doRemote(cmd: WidgetCommand): Promise<{ ok: boolean; error?: stri
       if (cmd === "unlock") await client.unlock()
       else await client.lock()
       set({ selective: false })
-    } else if (isDoorCommand(cmd)) {
-      const wasLocked: boolean = (state.status?.vehicleLockState ?? 0) === LockState.LOCKED
-      await client.door(WIDGET_DOORS[cmd])
-      if (wasLocked) set({ selective: true })
     } else {
-      // 切换类指令要用最新状态判断
+      // 开合类指令按最新状态决定发不发（已经到位就不发，重复执行也安全）
       const st: VehicleStatus = await client.status()
       const req: Record<string, number> | null = closureRequest(cmd, st.closureStatuses as Record<string, number | undefined> | undefined)
       if (!req) log.info(`${COMMAND_ZH[cmd]}：已经是目标状态，不发送`)
-      else if (cmd === "frunk_open") await client.openFrunk()
+      else if (isDoorCommand(cmd)) {
+        await client.door(WIDGET_DOORS[cmd])
+        if (isLockedState(st.vehicleLockState)) set({ selective: true })
+      } else if (cmd === "frunk_open") await client.openFrunk()
       else if (cmd === "trunk_open") await client.openTrunk()
       else if (cmd === "trunk_close") await client.closeTrunk()
       else if (cmd === "charge_open") await client.openChargePort()
       else if (cmd === "charge_close") await client.closeChargePort()
     }
-    // 等车辆动完再存状态：每 1.5 秒读一次车身状态，到达目标状态或超时为止（只读一次会存下尾门还没动完时的旧状态）
-    try {
-      const t0: number = Date.now()
-      let st: VehicleStatus = await client.status()
-      while (!targetReached(cmd, st as any) && Date.now() - t0 < SETTLE_TIMEOUT_MS) {
-        await sleep(SETTLE_INTERVAL_MS)
-        st = await client.status()
-      }
-      applyStatus(st)
-    } catch (e: any) {
-      log.warn("小组件指令后读取状态失败: " + describeError(e))
-    }
+    // 指令已发出就先回复小组件（不让小组件那边等到超时、改走直连再发一次），
+    // 再在后台等车辆动完、存快照、刷新小组件
+    void settleAndReload(cmd)
     return { ok: true }
   } catch (e: any) {
     return { ok: false, error: describeError(e) }
   }
+}
+
+async function settleAndReload(cmd: WidgetCommand): Promise<void> {
+  const w = await waitForTarget(cmd, () => client.status())
+  log.info(`${COMMAND_ZH[cmd]}：${w.reached ? "已到位" : "未确认到位"}，用时 ${w.ms} ms`)
+  if (w.status) applyStatus(w.status)
+  Widget.reloadAll()
 }
 
 // ---- 车机（Infotainment） ----
@@ -503,9 +487,8 @@ async function askPin(title: string, message: string): Promise<string | null> {
 
 // ---- 指令 ----
 
-export function isOpen(v: number | undefined): boolean {
-  return v === ClosureState.OPEN || v === ClosureState.AJAR || v === ClosureState.OPENING
-}
+/** 开着（含半开、正在打开），定义在 core/widget_cmds，界面和小组件共用 */
+export const isOpen = closureOpen
 
 export const actions = {
   unlock: () => run("unlock", async () => {
@@ -525,7 +508,7 @@ export const actions = {
   /** 充电口：开着就关，否则打开 */
   chargePort: () => run("chargePort", () => (isOpen(state.status?.closureStatuses?.chargePort) ? client.closeChargePort() : client.openChargePort())),
   door: (key: DoorKey) => run(key, async () => {
-    const wasLocked: boolean = (state.status?.vehicleLockState ?? 0) === LockState.LOCKED
+    const wasLocked: boolean = isLockedState(state.status?.vehicleLockState)
     await client.door(key)
     if (wasLocked) set({ selective: true })
   }),

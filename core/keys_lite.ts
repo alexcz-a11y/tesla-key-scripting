@@ -2,6 +2,7 @@
 // 会话密钥缓存（Keychain）。小组件的轻量解锁路径只能用这些；core/keystore.ts 原样转出并加上私钥相关功能
 import { hex, unhex } from "./bytes"
 import { TeslaError } from "./errors"
+import { log } from "./log"
 import type { SessionKeys } from "./session"
 
 const ST_CONFIG: string = "tesla_key.config.v1"
@@ -46,7 +47,7 @@ export const DEFAULT_CONFIG: VehicleConfig = {
   unlockRssi: -62,
   leaveRssi: -85,
   autoLock: false,
-  debugLog: true,
+  debugLog: false,
 }
 
 export function loadConfig(): VehicleConfig {
@@ -121,7 +122,10 @@ export function cacheSessionKey(localPublic: Uint8Array, vehiclePublic: Uint8Arr
   const prev: SessionKeyStore | null = readKeyStore()
   const store: SessionKeyStore = prev && prev.local === local ? prev : { local, keys: {} }
   store.keys[hex(vehiclePublic)] = hex(K)
-  Keychain.set(KC_SESSION_KEYS, JSON.stringify(store), { accessibility: "unlocked_this_device" })
+  // Keychain.set 失败时返回 false（keychain 文档）：记下来，不然小组件之后只会报「没有缓存的会话密钥」
+  if (!Keychain.set(KC_SESSION_KEYS, JSON.stringify(store), { accessibility: "unlocked_this_device" })) {
+    log.warn("会话密钥写入钥匙串失败，小组件直连会用不了")
+  }
 }
 
 export function cachedSessionKey(localPublic: Uint8Array, vehiclePublic: Uint8Array): Uint8Array | null {

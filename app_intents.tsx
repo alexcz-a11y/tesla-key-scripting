@@ -2,17 +2,15 @@
 // 一个 AppIntent 带参数 cmd（core/widget_cmds 的 WidgetCommand）：解锁、上锁、弹开车门、前后备箱、充电口。依次尝试两条路径：
 //   1. 主脚本：Tesla Key 主界面正在运行时，通过 ScriptSession 交给它执行（复用已建立的蓝牙连接）
 //   2. 直连：主脚本没在运行时，在本环境里自己连接车辆执行（文档没写这个环境能否用蓝牙，所以先检测）
-// 后台蓝牙任务（bluetooth.tsx）只在蓝牙事件发生时运行，文档里没有让 AppIntent 触发它的方式，这里不走它
+// 不走后台蓝牙任务：文档里没有让 AppIntent 触发它的方式
 // 每次运行的步骤、结果和协议日志都存进 Storage（core/widget_runs.ts），在「钥匙与设置 → 调试日志」里查看
 // 注意：widget.tsx 要导入本文件，所以这里不能静态导入协议代码（protobufjs、协议描述、加密库）。
 // 小组件进程只有约 30 MB 内存（widget 文档：超限时小组件显示空白）。2026-10-17 静态导入时桌面小组件一直空白、App 内预览正常，推断就是这个原因。
 // 协议代码在 perform 里按需加载，只在点按钮时才进内存
 import { AppIntentManager, AppIntentProtocol, Widget } from "scripting"
 import { LogEntry, onLog } from "./core/log"
-import { COMMAND_ZH, isWidgetCommand, WidgetCommand } from "./core/widget_cmds"
+import { COMMAND_ZH, isWidgetCommand, ST_MAIN_SESSION, WidgetCommand } from "./core/widget_cmds"
 import { saveRun, WidgetResult, WidgetRun } from "./core/widget_runs"
-
-export const ST_MAIN_SESSION: string = "tesla_key.main_session"
 
 function probeEnv(): Record<string, boolean> {
   const g: any = globalThis as any
@@ -32,6 +30,15 @@ function fmtLog(e: LogEntry): string {
   return `[+${e.t % 100000} ${e.level}] ${e.msg.length > 300 ? e.msg.slice(0, 300) + "…" : e.msg}`
 }
 
+/**
+ * 主脚本不在、或没接下这个请求时才改走直连（script_session 文档：已接受的工作不会撤销，挂起期间过期的排队命令会被丢弃）：
+ * 会话不存在 / 已关闭 / 不可用 / 处理器无效 / 超时（主脚本被挂起，命令被丢弃）。
+ * 主脚本正忙（BUSY，占着蓝牙）或处理器执行出错时不改走直连，直接报错，避免同一条指令发两次、两条连接抢车
+ */
+const FALLBACK_CODES: string[] = [
+  "SCRIPT_SESSION_UNAVAILABLE", "SCRIPT_SESSION_NOT_FOUND", "SCRIPT_SESSION_CLOSED", "SCRIPT_SESSION_INVALID_HANDLER", "SCRIPT_SESSION_TIMEOUT",
+]
+
 /** 交给主脚本执行：成功返回 null；主脚本不可用时返回原因（调用方改走直连）；主脚本执行失败则抛出 */
 async function viaMain(cmd: WidgetCommand, onMainMs: (ms: number) => void): Promise<string | null> {
   const id: string | null = Storage.get<string>(ST_MAIN_SESSION)
@@ -42,8 +49,8 @@ async function viaMain(cmd: WidgetCommand, onMainMs: (ms: number) => void): Prom
     if (reply?.ok) return null
     throw new Error(reply?.error ?? "主脚本没有完成")
   } catch (e: any) {
-    // 主脚本已关闭 / 被挂起：改走直连。每条指令都能重复执行（前后备箱按当前状态决定发不发），主脚本稍后又执行一次也没关系
-    if (typeof e?.code === "string" && e.code.startsWith("SCRIPT_SESSION_")) return errText(e)
+    // 主脚本不在 / 被挂起：改走直连。万一主脚本其实执行过，开合类指令按当前状态决定发不发，重复一次也安全
+    if (typeof e?.code === "string" && FALLBACK_CODES.includes(e.code)) return errText(e)
     throw e
   }
 }

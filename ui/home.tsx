@@ -3,6 +3,7 @@ import { HStack, Navigation, Script, ShapeStyle, Spacer, VirtualNode, VStack } f
 import { ClosureState, LockState, SleepStatus, UserPresence } from "../core/proto"
 import { DoorKey } from "../client/vehicle"
 import { actions, AppState, autoConnect, disconnect, isOpen, useApp } from "./store"
+import { isLockedState } from "../core/widget_cmds"
 import { Board, BOTTOM_PAD, Bottom, C, Col, En, Ends, Geo, Pair, Row, Split, Tile, Zh } from "./kit"
 
 export function closureEn(v: number | undefined, known: boolean, shut: string = "Closed"): string {
@@ -50,7 +51,7 @@ export function HomePage(p: { onAll: () => void; onKeys: () => void }): VirtualN
   const known: boolean = st != null
   const c = st?.closureStatuses ?? {}
   // 状态未知时按已上锁处理：主操作显示「解锁」
-  const locked: boolean = !known || (st?.vehicleLockState ?? LockState.UNLOCKED) === LockState.LOCKED || s.selective
+  const locked: boolean = !known || isLockedState(st?.vehicleLockState) || s.selective
   const idle: boolean = s.busy == null
 
   return <Board render={(g: Geo) => {
