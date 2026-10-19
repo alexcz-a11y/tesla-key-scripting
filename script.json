@@ -3,7 +3,7 @@
   "icon": "car.fill",
   "iconImage": "assets/icon.png",
   "color": "#E31937",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Tesla BLE virtual key (vehicle-command protocol).",
   "localizedNames": {
     "zh": "Tesla 钥匙"

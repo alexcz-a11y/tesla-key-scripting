@@ -30,8 +30,7 @@ async function connMenu(s: AppState, dismiss: () => void): Promise<void> {
     connected ? { label: "断开蓝牙", run: () => disconnect() } : { label: "连接车辆", run: () => autoConnect() },
   ]
   if (Script.supportsMinimization()) items.push({ label: "收起到后台", run: () => void Script.minimize() })
-  items.push({ label: "查看控制台", run: () => console.present() })
-  items.push({ label: "关闭页面（查看控制台）", run: () => dismiss() })
+  items.push({ label: "退出", run: () => dismiss() })
   const msg: string = s.connErr && !connected ? s.connErr : connected ? "已通过蓝牙连接车辆" : "未连接"
   const i: number | null = await Dialog.actionSheet({ title: "蓝牙连接", message: msg, actions: items.map((a) => ({ label: a.label, destructive: a.destructive })) })
   if (i != null && i >= 0 && items[i]) await items[i].run()

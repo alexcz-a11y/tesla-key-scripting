@@ -43,7 +43,6 @@ function App(): VirtualNode {
 
 async function main(): Promise<void> {
   // 按 status_bar 文档：全屏呈现，statusBarHidden 才生效。退出：轻点左上 Connected 块 →「退出」
-  // 调试阶段：页面关闭后弹出控制台，方便看 console 输出
   // 主界面运行期间接收小组件的指令（ScriptSession：只能由 index 注册，主脚本关闭后失效）
   const sessionId: string = ScriptSession.register(async (message: ScriptSession.Value) => {
     const cmd: unknown = message && typeof message === "object" && !Array.isArray(message) ? message.command : null
@@ -60,7 +59,6 @@ async function main(): Promise<void> {
     if (Storage.get<string>(ST_MAIN_SESSION) === sessionId) Storage.remove(ST_MAIN_SESSION)
   }
   await disconnect()
-  await console.present()
   Script.exit()
 }
 
