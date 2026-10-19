@@ -1,0 +1,6 @@
+{
+  "dependencies" : {
+    "@noble/curves" : "^2.4.0",
+    "protobufjs" : "^8.8.1"
+  }
+}

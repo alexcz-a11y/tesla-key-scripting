@@ -1,0 +1,29 @@
+// 协议常量（来自 .proto 的枚举值）。不依赖 protobufjs，小组件的轻量解锁路径也能用；core/proto.ts 原样转出
+
+export const Domain = { BROADCAST: 0, VCSEC: 2, INFOTAINMENT: 3 } as const
+export type DomainId = 2 | 3
+
+/** universal_message.proto Flags：FLAG_ENCRYPT_RESPONSE 是第 1 位 */
+export const FLAG_ENCRYPT_RESPONSE: number = 1 << 1
+
+export const MessageFault = {
+  NONE: 0, BUSY: 1, TIMEOUT: 2, UNKNOWN_KEY_ID: 3, INACTIVE_KEY: 4, INVALID_SIGNATURE: 5,
+  INVALID_TOKEN_OR_COUNTER: 6, INSUFFICIENT_PRIVILEGES: 7, INVALID_DOMAINS: 8, INVALID_COMMAND: 9,
+  DECODING: 10, INTERNAL: 11, WRONG_PERSONALIZATION: 12, BAD_PARAMETER: 13, KEYCHAIN_IS_FULL: 14,
+  INCORRECT_EPOCH: 15, IV_INCORRECT_LENGTH: 16, TIME_EXPIRED: 17, NOT_PROVISIONED_WITH_IDENTITY: 18,
+  COULD_NOT_HASH_METADATA: 19, TIME_TO_LIVE_TOO_LONG: 20, REMOTE_ACCESS_DISABLED: 21,
+  REMOTE_SERVICE_ACCESS_DISABLED: 22, COMMAND_REQUIRES_ACCOUNT_CREDENTIALS: 23,
+  REQUEST_MTU_EXCEEDED: 24, RESPONSE_MTU_EXCEEDED: 25, REPEATED_COUNTER: 26, INVALID_KEY_HANDLE: 27,
+  REQUIRES_RESPONSE_ENCRYPTION: 28,
+} as const
+
+export const RKEAction = { UNLOCK: 0, LOCK: 1, REMOTE_DRIVE: 20, AUTO_SECURE_VEHICLE: 29, WAKE_VEHICLE: 30 } as const
+export const ClosureMove = { NONE: 0, MOVE: 1, STOP: 2, OPEN: 3, CLOSE: 4 } as const
+export const InfoRequest = { GET_STATUS: 0, GET_WHITELIST_INFO: 5, GET_WHITELIST_ENTRY_INFO: 6 } as const
+export const KeyRole = { NONE: 0, SERVICE: 1, OWNER: 2, DRIVER: 3, FM: 4, VEHICLE_MONITOR: 5, CHARGING_MANAGER: 6, GUEST: 8 } as const
+export const KeyFormFactor = { UNKNOWN: 0, NFC_CARD: 1, IOS_DEVICE: 6, ANDROID_DEVICE: 7, CLOUD_KEY: 9 } as const
+export const VcsecOpStatus = { OK: 0, WAIT: 1, ERROR: 2 } as const
+export const LockState = { UNLOCKED: 0, LOCKED: 1, INTERNAL_LOCKED: 2, SELECTIVE_UNLOCKED: 3 } as const
+export const SleepStatus = { UNKNOWN: 0, AWAKE: 1, ASLEEP: 2 } as const
+export const ClosureState = { CLOSED: 0, OPEN: 1, AJAR: 2, UNKNOWN: 3, FAILED_UNLATCH: 4, OPENING: 5, CLOSING: 6 } as const
+export const UserPresence = { UNKNOWN: 0, NOT_PRESENT: 1, PRESENT: 2 } as const

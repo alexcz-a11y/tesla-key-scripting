@@ -1,0 +1,9 @@
+{
+  "name": "Tesla Key",
+  "icon": "key.car.radiowaves.left.and.right",
+  "color": "#E31937",
+  "version": "1.0.0",
+  "description": "Tesla BLE virtual key (vehicle-command protocol).",
+  "localizedNames": { "zh": "Tesla 钥匙" },
+  "localizedDescriptions": { "zh": "通过蓝牙作为 Tesla 虚拟钥匙控制车辆" }
+}
